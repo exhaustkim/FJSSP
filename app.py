@@ -136,7 +136,7 @@ def page_benchmark():
 
 @app.route("/scenario-manager")
 def page_scenario():
-    return render_template("scenario_manager.html", active="scenario")
+    return render_template("scenario_manager.html", active="scenario", _settings=_settings)
 
 @app.route("/rule-explorer")
 def page_rule_explorer():
