@@ -74,6 +74,11 @@
       <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-genlog">🧬 세대별 생성 로그</a></li>
       <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-genealogy">🌳 계보 그래프</a></li>
       <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-best">⭐ 최적 규칙</a></li>
+      <li class="nav-item ms-auto d-flex align-items-center pe-2">
+        <button class="btn btn-sm btn-outline-secondary" onclick="downloadCurrentEvoResult()" title="현재 결과 JSON 다운로드">
+          <i class="fa fa-download me-1"></i>JSON 저장
+        </button>
+      </li>
       <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-pool">📋 풀 스냅샷</a></li>
     </ul>
     <div class="tab-content">
@@ -148,6 +153,7 @@ require(['vs/editor/editor.main'], function() {
 });
 
 let _allBenchmarks = {};
+let _currentEvoData = null;
 
 function saveSelection() {
   const f = document.getElementById('ev-family').value;
@@ -183,10 +189,14 @@ async function loadPastResults() {
   const el = document.getElementById('past-results');
   if (!d.data.length) { el.textContent = '저장된 결과 없음'; return; }
   el.innerHTML = d.data.map(r => `
-    <div class="mb-2 p-2 rounded" style="background:var(--bg-surface); cursor:pointer"
-         onclick="loadResult('${r.file}')">
-      <div class="fw-bold small">${r.method} — ${r.instance?.toUpperCase()}</div>
-      <div class="text-muted" style="font-size:11px">${r.scenario} · AT=${fmt(r.best_at)} · ARI=${fmtPct(r.ari)}</div>
+    <div class="mb-2 p-2 rounded" style="background:var(--bg-surface)">
+      <div class="fw-bold small" style="cursor:pointer" onclick="loadResult('${r.file}')">${r.method} — ${r.instance?.toUpperCase()}</div>
+      <div class="d-flex justify-content-between align-items-center mt-1">
+        <div class="text-muted" style="font-size:11px">${r.scenario} · AT=${fmt(r.best_at)} · ARI=${fmtPct(r.ari)}</div>
+        <button class="btn btn-icon btn-sm" onclick="downloadEvoResult('${r.file}')" title="JSON 다운로드" style="padding:2px 6px">
+          <i class="fa fa-download" style="font-size:11px"></i>
+        </button>
+      </div>
     </div>`).join('');
 }
 
@@ -247,7 +257,31 @@ async function loadResult(fname) {
   document.getElementById('evTabs').querySelectorAll('.nav-link')[0].click();
 }
 
+async function downloadEvoResult(fname) {
+  const d = await API.get(`/api/evolution/result/${fname}`);
+  if (!d.ok) { toast(d.error, 'error'); return; }
+  const blob = new Blob([JSON.stringify(d.data, null, 2)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = fname;
+  a.click();
+  toast('JSON 파일 저장 완료', 'success');
+}
+
+function downloadCurrentEvoResult() {
+  if (!_currentEvoData) { toast('표시된 결과가 없습니다.', 'warning'); return; }
+  const inst = _currentEvoData.instance || 'result';
+  const meth = _currentEvoData.method  || 'evo';
+  const blob = new Blob([JSON.stringify(_currentEvoData, null, 2)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `evolution_${meth}_${inst}.json`;
+  a.click();
+  toast('JSON 파일 저장 완료', 'success');
+}
+
 function displayResult(data) {
+  _currentEvoData = data;
   if ((data.iteration_best_at||[]).length) updateLiveChart(data.iteration_best_at);
   drawGenealogyGraph(data.genealogy || []);
   buildGenLog(data.generation_log || []);

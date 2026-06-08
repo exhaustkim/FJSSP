@@ -10,16 +10,36 @@
         <i class="fa fa-scale-balanced text-accent"></i>
         <span class="wb-card-title">결과 파일 선택</span>
       </div>
-      <div class="mb-3">
-        <label class="form-label">기본 규칙 결과 파일</label>
+      <div class="wb-card-subtitle mb-2">서버 저장 파일</div>
+      <div class="mb-2">
+        <label class="form-label mb-1">기본 규칙 결과</label>
         <select id="hva-baseline" class="form-select form-select-sm"></select>
       </div>
       <div class="mb-3">
-        <label class="form-label">P1 / P2 / P3 진화 결과 파일</label>
+        <label class="form-label mb-1">진화 결과 (P1/P2/P3)</label>
         <select id="hva-evo" class="form-select form-select-sm">
           <option value="">없음</option>
         </select>
       </div>
+
+      <hr style="border-color:var(--border)">
+      <div class="wb-card-subtitle mb-2">로컬 파일 직접 업로드</div>
+      <div class="mb-2">
+        <label class="form-label mb-1" style="font-size:12px">기본 규칙 JSON (baselines_*.json)</label>
+        <input type="file" id="hva-local-baseline" accept=".json" class="form-control form-control-sm"
+               onchange="readLocalBaseline()">
+        <div id="hva-local-baseline-label" class="small text-muted mt-1">파일 미선택</div>
+      </div>
+      <div class="mb-3">
+        <label class="form-label mb-1" style="font-size:12px">진화 결과 JSON (evolution_*.json)</label>
+        <input type="file" id="hva-local-evo" accept=".json" class="form-control form-control-sm"
+               onchange="readLocalEvo()">
+        <div id="hva-local-evo-label" class="small text-muted mt-1">파일 미선택</div>
+      </div>
+      <div class="small text-muted mb-3" style="font-size:11px">
+        * 서버 파일과 로컬 파일 중 로컬 파일이 우선 적용됩니다.
+      </div>
+
       <button class="btn btn-primary w-100" onclick="buildComparison()">
         <i class="fa fa-chart-bar me-2"></i>비교 분석
       </button>
@@ -86,6 +106,37 @@
 
 {% block scripts %}
 <script>
+let _localBaselineData = null;
+let _localEvoData = null;
+
+function readLocalBaseline() {
+  const file = document.getElementById('hva-local-baseline').files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      _localBaselineData = JSON.parse(e.target.result);
+      document.getElementById('hva-local-baseline-label').textContent = '✓ ' + file.name;
+      document.getElementById('hva-local-baseline-label').className = 'small text-success mt-1';
+    } catch { toast('JSON 파싱 오류: 기본 규칙 파일', 'error'); }
+  };
+  reader.readAsText(file);
+}
+
+function readLocalEvo() {
+  const file = document.getElementById('hva-local-evo').files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      _localEvoData = JSON.parse(e.target.result);
+      document.getElementById('hva-local-evo-label').textContent = '✓ ' + file.name;
+      document.getElementById('hva-local-evo-label').className = 'small text-success mt-1';
+    } catch { toast('JSON 파싱 오류: 진화 결과 파일', 'error'); }
+  };
+  reader.readAsText(file);
+}
+
 const RULE_VARS = {
   B1:  ['release_time'],
   B2:  ['due_date'],
@@ -132,16 +183,28 @@ function countConditions(code) {
 async function buildComparison() {
   const bfile = document.getElementById('hva-baseline').value;
   const efile = document.getElementById('hva-evo').value;
-  if (!bfile) { toast('기본 규칙 파일을 선택해 주세요.', 'warning'); return; }
 
-  const [bd, ed] = await Promise.all([
-    API.get(`/api/results/${bfile}`),
-    efile ? API.get(`/api/evolution/result/${efile}`) : Promise.resolve({ok:false}),
-  ]);
-  if (!bd.ok) { toast(bd.error,'error'); return; }
+  let baselineData, evoData = null;
+
+  // 로컬 파일 우선, 없으면 서버 파일 사용
+  if (_localBaselineData) {
+    baselineData = _localBaselineData;
+  } else {
+    if (!bfile) { toast('기본 규칙 파일을 선택하거나 로컬 JSON을 업로드해 주세요.', 'warning'); return; }
+    const bd = await API.get(`/api/results/${bfile}`);
+    if (!bd.ok) { toast(bd.error, 'error'); return; }
+    baselineData = bd.data;
+  }
+
+  if (_localEvoData) {
+    evoData = _localEvoData;
+  } else if (efile) {
+    const ed = await API.get(`/api/evolution/result/${efile}`);
+    if (ed.ok) evoData = ed.data;
+  }
 
   const rows = [];
-  Object.entries(bd.data).sort((a,b)=>a[1].mean-b[1].mean).forEach(([bid, v]) => {
+  Object.entries(baselineData).sort((a,b)=>a[1].mean-b[1].mean).forEach(([bid, v]) => {
     rows.push({
       method:'인간 (기본 규칙)', id:bid, type:'기본 규칙',
       at_mean:v.mean, at_std:v.std, ptj:v.ptj, ari:v.ari||0,
@@ -152,11 +215,11 @@ async function buildComparison() {
     });
   });
 
-  if (ed.ok) {
-    const best = ed.data.best_rule || {};
-    const s = ed.data.summary || {};
+  if (evoData) {
+    const best = evoData.best_rule || {};
+    const s = evoData.summary || {};
     rows.push({
-      method: `AI (${ed.data.method || 'LLM'})`,
+      method: `AI (${evoData.method || 'LLM'})`,
       id: best.rule_id || '—',
       type: ed.data.method,
       at_mean: s.mean, at_std: s.std, ptj: s.ptj, ari: s.ari||0,
@@ -240,7 +303,7 @@ async function buildComparison() {
   );
 
   // AI 생성 로그
-  buildHvaGenLog(ed.ok ? (ed.data.generation_log || []) : []);
+  buildHvaGenLog(evoData ? (evoData.generation_log || []) : []);
 }
 
 function buildHvaGenLog(logEntries) {
