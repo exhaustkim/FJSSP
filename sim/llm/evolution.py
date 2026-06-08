@@ -26,6 +26,7 @@ from .operators import (
     e1_mutation, e2_crossover, m1_reflection,
     m2_simplification, initial_generation_prompt,
 )
+from .client import generate_lessons
 from .experience import ExperienceStore
 
 N_ITER      = 20
@@ -186,13 +187,7 @@ class EoHEvolution:
                     entry.entered_pool = True
 
             if self.use_experience:
-                best_baseline_at = self._best_baseline_at(pool)
-                for rule in pool:
-                    pattern = self._extract_pattern(rule, best_baseline_at)
-                    self.store.record(
-                        self.scenario_tag, iteration,
-                        rule.code, rule.avg_at, best_baseline_at, pattern,
-                    )
+                self._run_reflector(pool, iteration)
 
             pool = new_pool
 
@@ -285,10 +280,20 @@ class EoHEvolution:
                         if self.use_experience else None)
         best_baseline = self._best_baseline_at(top)
 
+        # Build elite_rules list for context: [(rule_id, code, avg_at)]
+        elite_rules = [
+            (r.rule_id, r.code or _fn_to_code(r.fn), r.avg_at)
+            for r in top[:3]
+        ]
+
         # E1 × 3
         for rank in range(min(3, len(top))):
             t      = top[rank]
-            prompt = e1_mutation(t.rule_id, t.code or _fn_to_code(t.fn), t.avg_at)
+            prompt = e1_mutation(
+                t.rule_id, t.code or _fn_to_code(t.fn), t.avg_at,
+                scenario_desc=self.scenario_desc,
+                top_rules=elite_rules,
+            )
             r = self._try_generate(
                 f"E1_{iteration}_{rank+1}", prompt,
                 operator="E1", parents=[t.rule_id], generation=iteration)
@@ -300,6 +305,7 @@ class EoHEvolution:
             prompt = e2_crossover(
                 a.rule_id, a.code or _fn_to_code(a.fn), a.avg_at,
                 b.rule_id, b.code or _fn_to_code(b.fn), b.avg_at,
+                scenario_desc=self.scenario_desc,
             )
             r = self._try_generate(
                 f"E2_{iteration}_{k+1}", prompt,
@@ -320,7 +326,10 @@ class EoHEvolution:
 
         # M2 × 1
         t      = top[0]
-        prompt = m2_simplification(t.rule_id, t.code or _fn_to_code(t.fn), t.avg_at)
+        prompt = m2_simplification(
+            t.rule_id, t.code or _fn_to_code(t.fn), t.avg_at,
+            scenario_desc=self.scenario_desc,
+        )
         r = self._try_generate(
             f"M2_{iteration}", prompt,
             operator="M2", parents=[t.rule_id], generation=iteration)
@@ -383,14 +392,29 @@ class EoHEvolution:
             return float("inf")
         return min(r.avg_at for r in entries)
 
-    def _extract_pattern(self, rule: RuleEntry, best_baseline_at: float) -> str:
-        is_success = rule.avg_at <= best_baseline_at * 0.95
-        label      = "SUCCESS" if is_success else "FAILURE"
-        return (
-            f"[{label}] 규칙 {rule.rule_id}: AT={rule.avg_at:.4f} "
-            f"vs 최적 기본={best_baseline_at:.4f}. "
-            f"코드 요약: {(rule.code or '')[:200]}"
-        )
+    def _run_reflector(self, pool: List[RuleEntry], iteration: int) -> None:
+        """LLM-S: extract structured lessons from this generation and store them (P3)."""
+        best_baseline = self._best_baseline_at(pool)
+        llm_rules = [r for r in pool if r.operator not in ("BASELINE",) and r.code]
+
+        success = [
+            (r.rule_id, r.code, r.avg_at, best_baseline)
+            for r in llm_rules if r.avg_at <= best_baseline * 0.95
+        ]
+        failure = [
+            (r.rule_id, r.code, r.avg_at, best_baseline)
+            for r in llm_rules if r.avg_at > best_baseline * 1.05
+        ]
+
+        if not success and not failure:
+            return
+
+        lessons = generate_lessons(self.scenario_desc, success, failure)
+        for lesson in lessons:
+            self.store.record_lesson(self.scenario_tag, iteration, lesson)
+
+        if lessons:
+            print(f"  [LLM-S] {iteration}세대 교훈 {len(lessons)}개 저장")
 
 
 def _fn_to_code(fn: Callable) -> str:
