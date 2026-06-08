@@ -170,6 +170,10 @@ def page_human_vs_ai():
 def page_report():
     return render_template("report_generator.html", active="report")
 
+@app.route("/event-translator")
+def page_event_translator():
+    return render_template("event_translator.html", active="event_translator")
+
 @app.route("/settings")
 def page_settings():
     return render_template("settings.html", active="settings")
@@ -1101,6 +1105,181 @@ def _load_results(tag: str) -> Optional[dict]:
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
     return None
+
+
+# ---------------------------------------------------------------------------
+# API — LLM Narrative Report  (Human vs AI 서술형 분석)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/report/narrative", methods=["POST"])
+def api_report_narrative():
+    """Generate LLM narrative analysis comparing human baselines vs AI-evolved rule."""
+    from sim.llm.client import _client as _llm, MODEL as _MODEL
+
+    body = request.json or {}
+    baseline_data = body.get("baseline_data", {})
+    evo_data      = body.get("evo_data", {})
+    instance      = body.get("instance", "")
+    scenario      = body.get("scenario", "S0")
+
+    if not baseline_data:
+        return jsonify({"ok": False, "error": "기본 규칙 데이터가 없습니다."}), 400
+    if _llm is None:
+        return jsonify({"ok": False, "error": "OpenAI API 키가 설정되지 않았습니다."}), 503
+
+    sorted_b = sorted(baseline_data.items(), key=lambda x: x[1].get("mean", 9999))
+    best_b, worst_b = sorted_b[0], sorted_b[-1]
+    spread_pct = ((worst_b[1].get("mean", 0) - best_b[1].get("mean", 0))
+                  / max(worst_b[1].get("mean", 0.001), 0.001) * 100)
+
+    baseline_rows = "\n".join(
+        f"  {bid}: AT={v.get('mean',0):.3f}±{v.get('std',0):.3f},"
+        f" 납기위반={v.get('ptj',0):.1f}%, ARI={v.get('ari',0):+.1f}%"
+        for bid, v in sorted_b
+    )
+
+    evo_block = "(AI 진화 결과 없음 — 기본 규칙만 분석)"
+    if evo_data:
+        best = evo_data.get("best_rule", {})
+        s    = evo_data.get("summary", {})
+        evo_block = (
+            f"방식: {evo_data.get('method','LLM')}  |  규칙: {best.get('rule_id','—')}\n"
+            f"  AT={s.get('mean',0):.3f}±{s.get('std',0):.3f},"
+            f" 납기위반={s.get('ptj',0):.1f}%,"
+            f" ARI={s.get('ari',0):+.1f}%,"
+            f" 발견={best.get('generation','—')}세대,"
+            f" 생성방식={best.get('operator_kr', best.get('operator','—'))}"
+        )
+
+    scen_desc = {"S0": "정상 운영", "S1": "부품 지연 교란", "S2": "긴급 주문 교란"}.get(scenario, scenario)
+
+    prompt = f"""당신은 제조 스케줄링 AI 연구 보고서 작성 전문가입니다.
+FJSSP(유연 작업장 스케줄링 문제) 실험 결과를 분석하여 한국어 서술형 보고서를 작성하세요.
+
+== 실험 개요 ==
+벤치마크: {instance.upper() if instance else '미지정'}  |  시나리오: {scenario} ({scen_desc})
+
+== 기본 규칙(인간 설계) 성능 — AT 오름차순 ==
+{baseline_rows}
+최적: {best_b[0]} (AT {best_b[1].get('mean',0):.3f})  |  최악: {worst_b[0]} (AT {worst_b[1].get('mean',0):.3f})  |  개선폭: {spread_pct:.1f}%
+
+== AI 진화 결과 ==
+{evo_block}
+
+== 작성 지침 ==
+아래 4개 항목을 각각 제목 포함 단락으로 작성하세요. 수치는 반드시 인용하고, 전문적이되 실무자도 이해할 수 있는 문체로 작성하세요.
+
+**1. 기본 규칙 성능 분석**
+B1~B10 규칙 간 성능 분포, 최적/최악 규칙의 알고리즘 특성, 시나리오 적합성을 2~3문장으로 서술.
+
+**2. {'인간 vs AI 비교 분석' if evo_data else '규칙 전략 심화 분석'}**
+{'AI 진화 규칙이 기본 규칙 대비 ARI 수치를 활용해 얼마나 개선했는지, 핵심 차별점을 3~4문장으로 비교.' if evo_data else '최적·차선 규칙의 알고리즘 차이와 시나리오별 우위 요인을 3~4문장으로 분석.'}
+
+**3. {'AI 진화 규칙 실무 적용 평가' if evo_data else '시나리오 대응 전략'}**
+{'AI 규칙의 코드 복잡도, 일반화 가능성, 현장 도입 시 고려사항을 2~3문장으로 평가.' if evo_data else '해당 시나리오 특성에 맞는 규칙 운용 전략을 2~3문장으로 제안.'}
+
+**4. 결론 및 권장 사항**
+핵심 발견사항과 실무 적용 권장 사항을 2~3문장으로 요약."""
+
+    try:
+        resp = _llm.chat.completions.create(
+            model=_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=1500,
+        )
+        return jsonify({"ok": True, "narrative": resp.choices[0].message.content})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# API — Supply Chain Event → Simulation Parameter Translation
+# ---------------------------------------------------------------------------
+
+@app.route("/api/event/translate", methods=["POST"])
+def api_event_translate():
+    """Translate a real-world supply chain disruption event into FJSSP simulation parameters."""
+    import re as _re
+    from sim.llm.client import _client as _llm, MODEL as _MODEL
+
+    body          = request.json or {}
+    event_types   = body.get("event_types", [])
+    delay_days    = float(body.get("delay_days", 0))
+    affected_parts = body.get("affected_parts", "")
+    severity      = body.get("severity", "medium")
+    additional    = body.get("additional_info", "")
+
+    if _llm is None:
+        return jsonify({"ok": False, "error": "OpenAI API 키가 설정되지 않았습니다."}), 503
+
+    sev_kr = {"low": "경미", "medium": "중간", "high": "심각"}.get(severity, "중간")
+
+    prompt = f"""당신은 공급망 이벤트를 FJSSP 생산 스케줄링 시뮬레이션 파라미터로 변환하는 전문가입니다.
+
+[FJSSP 시뮬레이션 시나리오]
+S1 (부품 지연): 일부 작업의 부품 도착이 지연됨
+  - s1_ratio: 영향받는 작업 비율 (0.05~1.0)
+  - s1_k: 지연량 배수 — 지연시간 = avg_min_pt × s1_k (0.3~5.0)
+  - s1_timing_min/max: 지연 이벤트 발생 타이밍 (전체 T_est 대비 비율, 0.0~1.0)
+
+S2 (긴급 주문): 스케줄 도중 긴급 작업이 삽입됨
+  - s2_ddf: 납기 여유 배수 (0.1=매우 촉박 ~ 2.0=여유)
+  - s2_n_urgent: 긴급 주문 건수 (1~5)
+  - s2_arrival_min/max: 주문 도착 타이밍 (0.0~1.0)
+
+[입력 이벤트]
+유형: {', '.join(event_types) if event_types else '미지정'}
+예상 지연: {delay_days}일
+영향 부품: {affected_parts or '미지정'}
+심각도: {sev_kr}
+추가 정보: {additional or '없음'}
+
+[변환 규칙]
+- 항만 폐쇄/공급업체 화재/파업/지정학적 리스크 → S1
+- 품질 문제 → S1 (재작업 지연)
+- 긴급 주문 → S2
+- 복합 이벤트 (S1 계열 + 긴급 주문) → S1+S2
+- 지연 일수가 많고 심각도가 높을수록 s1_k 증가, s1_ratio 증가
+- 긴급 주문 납기가 촉박할수록 s2_ddf 감소
+
+반드시 아래 JSON 형식만 반환하세요:
+{{
+  "primary_scenario": "S1" 또는 "S2" 또는 "S1+S2",
+  "s1_params": {{"s1_ratio": 숫자, "s1_k": 숫자, "s1_timing_min": 숫자, "s1_timing_max": 숫자}},
+  "s2_params": {{"s2_ddf": 숫자, "s2_n_urgent": 정수, "s2_arrival_min": 숫자, "s2_arrival_max": 숫자}},
+  "rationale": {{
+    "scenario_reason": "시나리오 선택 이유 (1~2문장)",
+    "s1_ratio_reason": "비율 설정 근거 (1문장, S1 없으면 null)",
+    "s1_k_reason": "배수 설정 근거 (1문장, S1 없으면 null)",
+    "s2_reason": "S2 파라미터 설정 근거 (1문장, S2 없으면 null)"
+  }},
+  "impact_summary": "이벤트가 생산 스케줄에 미치는 영향 요약 (2~3문장)"
+}}"""
+
+    try:
+        resp = _llm.chat.completions.create(
+            model=_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=900,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content.strip()
+        result = json.loads(raw)
+        return jsonify({"ok": True, "data": result})
+    except json.JSONDecodeError:
+        # fallback: extract JSON block
+        try:
+            m = _re.search(r'\{.*\}', raw, _re.DOTALL)
+            if m:
+                result = json.loads(m.group())
+                return jsonify({"ok": True, "data": result})
+        except Exception:
+            pass
+        return jsonify({"ok": False, "error": "LLM 응답 JSON 파싱 오류", "raw": raw[:500]}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ---------------------------------------------------------------------------
