@@ -12,8 +12,12 @@
       </div>
 
       <div class="mb-3">
+        <label class="form-label">패밀리</label>
+        <select id="rg-family" class="form-select form-select-sm" onchange="onFamilyChange()"></select>
+      </div>
+      <div class="mb-3">
         <label class="form-label">벤치마크 인스턴스</label>
-        <select id="rg-instance" class="form-select form-select-sm"></select>
+        <select id="rg-instance" class="form-select form-select-sm" onchange="saveSelection()"></select>
       </div>
       <div class="mb-3">
         <label class="form-label">시나리오</label>
@@ -90,12 +94,34 @@
 
 {% block scripts %}
 <script>
+let _allBenchmarks = {};
+
+function saveSelection() {
+  const f = document.getElementById('rg-family').value;
+  const i = document.getElementById('rg-instance').value;
+  if (f) localStorage.setItem('fjssp_family', f);
+  if (i) localStorage.setItem('fjssp_instance', i);
+}
+
+function onFamilyChange() {
+  const family = document.getElementById('rg-family').value;
+  const instances = _allBenchmarks[family] || [];
+  const saved = localStorage.getItem('fjssp_instance');
+  document.getElementById('rg-instance').innerHTML =
+    instances.map(n => `<option value="${n}"${n===saved?' selected':''}>${n.toUpperCase()}</option>`).join('');
+  saveSelection();
+}
+
 async function loadInstances() {
   const d = await API.get('/api/benchmarks');
   if (!d.ok) return;
-  const list = Object.values(d.data)[0] || [];
-  document.getElementById('rg-instance').innerHTML =
-    list.map(n => `<option value="${n}">${n.toUpperCase()}</option>`).join('');
+  _allBenchmarks = d.data;
+  const savedFamily = localStorage.getItem('fjssp_family');
+  const families = Object.keys(d.data);
+  const selFamily = families.includes(savedFamily) ? savedFamily : families[0];
+  document.getElementById('rg-family').innerHTML =
+    families.map(f => `<option value="${f}"${f===selFamily?' selected':''}>${f.charAt(0).toUpperCase()+f.slice(1)}</option>`).join('');
+  onFamilyChange();
 }
 
 function getSections() {
@@ -107,8 +133,8 @@ async function generateReport(format) {
   const body = {
     format,
     instance: document.getElementById('rg-instance').value,
+    family:   document.getElementById('rg-family').value,
     scenario: document.getElementById('rg-scenario').value,
-    family:   'brandimarte',
     sections: getSections(),
   };
 
@@ -160,8 +186,8 @@ async function refreshPreview() {
   const body = {
     format: 'markdown',
     instance: document.getElementById('rg-instance').value,
+    family:   document.getElementById('rg-family').value,
     scenario: document.getElementById('rg-scenario').value,
-    family:  'brandimarte',
     sections: getSections(),
   };
 

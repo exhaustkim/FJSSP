@@ -54,15 +54,75 @@ def load_instance(name: str, family: str = "brandimarte") -> Tuple[List[Job], in
     n_machines : int
     """
     folder = FAMILY_FOLDERS.get(family, FAMILIES_DIR / family)
-    path = folder / f"{name.lower()}.json"
-    if not path.exists():
-        raise FileNotFoundError(f"Instance file not found: {path}")
-    return _load_from_path(path)
+    json_path = folder / f"{name.lower()}.json"
+    if json_path.exists():
+        return _load_from_path(json_path)
+    txt_path = folder / f"{name.lower()}.txt"
+    if txt_path.exists():
+        return _load_from_txt(txt_path)
+    raise FileNotFoundError(f"Instance file not found: {json_path}")
 
 
 def load_instance_from_path(path: str | Path) -> Tuple[List[Job], int]:
     """Load an FJSSP instance directly from a file path."""
     return _load_from_path(Path(path))
+
+
+def _load_from_txt(path: Path) -> Tuple[List[Job], int]:
+    """Parse standard FJSSP text format (Brandimarte / Hurink style).
+
+    Line 1 : n_jobs  n_machines  [avg_eligible – ignored if present]
+    Lines 2+: n_ops  [n_eligible  m1 p1  m2 p2 …]_op1  …
+    Machine indices are 1-based in some files, 0-based in others — we
+    normalise to 0-based by subtracting 1 when the minimum index > 0.
+    """
+    with open(path, encoding="utf-8") as fh:
+        tokens = fh.read().split()
+    pos = 0
+
+    n_jobs    = int(tokens[pos]); pos += 1
+    n_machines = int(tokens[pos]); pos += 1
+    # some files have a third header token (avg eligible); skip it
+    if pos < len(tokens) and not tokens[pos].startswith('-') and int(tokens[pos]) < 100:
+        # heuristic: if the token is small it's the avg-eligible header field
+        try:
+            val = int(tokens[pos])
+            if val < n_jobs and val < n_machines:
+                pos += 1
+        except ValueError:
+            pass
+
+    jobs: List[Job] = []
+    raw_machine_ids: List[int] = []
+
+    for job_idx in range(n_jobs):
+        n_ops = int(tokens[pos]); pos += 1
+        operations: List[Operation] = []
+        for op_idx in range(n_ops):
+            n_el = int(tokens[pos]); pos += 1
+            eligible: List[int] = []
+            pt_map: Dict[int, float] = {}
+            for _ in range(n_el):
+                m = int(tokens[pos]);     pos += 1
+                p = float(tokens[pos]);   pos += 1
+                eligible.append(m)
+                pt_map[m] = p
+                raw_machine_ids.append(m)
+            operations.append(Operation(
+                op_idx=op_idx,
+                eligible_machines=eligible,
+                processing_times=pt_map,
+            ))
+        jobs.append(Job(job_id=job_idx, release_time=0.0, due_date=0.0, operations=operations))
+
+    # normalise to 0-based if file uses 1-based machine ids
+    if raw_machine_ids and min(raw_machine_ids) >= 1:
+        for job in jobs:
+            for op in job.operations:
+                op.eligible_machines = [m - 1 for m in op.eligible_machines]
+                op.processing_times  = {m - 1: p for m, p in op.processing_times.items()}
+
+    return jobs, n_machines
 
 
 def _load_from_path(path: Path) -> Tuple[List[Job], int]:
@@ -101,7 +161,9 @@ def list_benchmarks() -> Dict[str, List[str]]:
     result: Dict[str, List[str]] = {}
     for family, folder in FAMILY_FOLDERS.items():
         if folder.exists():
-            names = sorted(p.stem for p in folder.glob("*.json"))
+            names_json = {p.stem for p in folder.glob("*.json")}
+            names_txt  = {p.stem for p in folder.glob("*.txt")}
+            names = sorted(names_json | names_txt)
             if names:
                 result[family] = names
     return result

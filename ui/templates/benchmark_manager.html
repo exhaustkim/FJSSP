@@ -75,17 +75,22 @@ async function loadFamilies() {
   const d = await API.get('/api/benchmarks');
   if (!d.ok) return;
   allInstances = d.data;
+  const savedFamily = localStorage.getItem('fjssp_family');
+  const families = Object.keys(d.data);
+  const selFamily = families.includes(savedFamily) ? savedFamily : families[0];
   const sel = document.getElementById('bm-family');
-  sel.innerHTML = Object.keys(d.data).map(f =>
-    `<option value="${f}">${f.charAt(0).toUpperCase()+f.slice(1)}</option>`).join('');
+  sel.innerHTML = families.map(f =>
+    `<option value="${f}"${f===selFamily?' selected':''}>${f.charAt(0).toUpperCase()+f.slice(1)}</option>`).join('');
   onFamilyChange();
 }
 
 function onFamilyChange() {
   const fam = document.getElementById('bm-family').value;
   const list = allInstances[fam] || [];
+  const savedInstance = localStorage.getItem('fjssp_instance');
   const inst = document.getElementById('bm-instance');
-  inst.innerHTML = list.map(n => `<option value="${n}">${n.toUpperCase()}</option>`).join('');
+  inst.innerHTML = list.map(n => `<option value="${n}"${n===savedInstance?' selected':''}>${n.toUpperCase()}</option>`).join('');
+  localStorage.setItem('fjssp_family', fam);
   loadAllStats(fam, list);
 }
 
@@ -141,6 +146,7 @@ async function loadStats() {
 
 function selectInstance(name) {
   document.getElementById('bm-instance').value = name;
+  localStorage.setItem('fjssp_instance', name);
   loadStats();
 }
 
