@@ -88,6 +88,23 @@
         <div id="rd-desc-content"></div>
       </div>
 
+      <!-- 자연어 설명 (LLM 호출) -->
+      <div class="wb-card mb-3" id="rd-nl-card" style="display:none">
+        <div class="wb-card-header">
+          <i class="fa fa-language text-accent"></i>
+          <span class="wb-card-title">자연어 설명 (AI)</span>
+          <button class="btn btn-sm btn-icon ms-auto" onclick="explainCurrentRule()" id="rd-nl-btn"
+                  title="이 규칙을 자연어로 다시 설명">
+            <i class="fa fa-rotate"></i>
+          </button>
+        </div>
+        <div id="rd-nl-content" class="p-2" style="font-size:13px; line-height:1.6">
+          <button class="btn btn-sm btn-primary" onclick="explainCurrentRule()">
+            <i class="fa fa-language me-1"></i>자연어로 설명 보기
+          </button>
+        </div>
+      </div>
+
       <!-- ③ Monaco 에디터 -->
       <div class="wb-card p-0 mb-3" style="overflow:hidden">
         <div class="p-2 border-bottom d-flex align-items-center gap-2" style="border-color:var(--border)">
@@ -476,6 +493,64 @@ function renderLLMDesc(r) {
 function copyCode() {
   navigator.clipboard.writeText(currentCode)
     .then(() => toast('코드가 클립보드에 복사되었습니다!', 'success'));
+}
+
+// 현재 선택된 규칙 자연어 설명 호출
+let _currentRule = null;
+const _origSelectRule = selectRule;
+selectRule = function(idx) {
+  _origSelectRule(idx);
+  _currentRule = allRules[idx];
+  // NL 카드 표시 + 초기화
+  const card = document.getElementById('rd-nl-card');
+  const content = document.getElementById('rd-nl-content');
+  if (card && content) {
+    card.style.display = 'block';
+    content.innerHTML = `<button class="btn btn-sm btn-primary" onclick="explainCurrentRule()">
+      <i class="fa fa-language me-1"></i>자연어로 설명 보기
+    </button>`;
+  }
+};
+
+async function explainCurrentRule() {
+  if (!_currentRule) { toast('규칙을 먼저 선택하세요','warning'); return; }
+  const content = document.getElementById('rd-nl-content');
+  content.innerHTML = '<i class="fa fa-spinner fa-spin me-2"></i>AI가 규칙을 분석 중...';
+  try {
+    const r = await fetch('/api/rule/explain', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        code: _currentRule.code || '',
+        rule_id: _currentRule.rule_id || '',
+        context: {scenario: '', }
+      })
+    });
+    const d = await r.json();
+    if (!d.ok) { content.innerHTML = `<div class="text-danger small">${d.error}</div>`; return; }
+    const v = (d.variables_used || []).map(x => `<span class="var-badge">${x}</span>`).join(' ');
+    content.innerHTML = `
+      <div class="mb-2"><strong>한 줄 요약:</strong> ${d.summary || '—'}</div>
+      <div class="mb-2"><strong>직관:</strong> <span style="color:var(--text-secondary)">${d.intuition || '—'}</span></div>
+      <div class="mb-2"><strong>핵심 변수:</strong> ${v || '—'}</div>
+      <div class="row g-2 mt-2">
+        <div class="col-md-6">
+          <div class="p-2 rounded" style="background:#1a3a1a30;border:1px solid #2f855a40">
+            <div class="small" style="color:#9ae6b4"><i class="fa fa-check me-1"></i>강한 상황</div>
+            <div class="small mt-1">${d.when_strong || '—'}</div>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="p-2 rounded" style="background:#3a1a1a30;border:1px solid #c5303040">
+            <div class="small" style="color:#feb2b2"><i class="fa fa-triangle-exclamation me-1"></i>약한 상황</div>
+            <div class="small mt-1">${d.when_weak || '—'}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    content.innerHTML = `<div class="text-danger small">${e}</div>`;
+  }
 }
 
 loadRules();
