@@ -675,16 +675,26 @@ def api_list_rules():
             "operator": "BASELINE",
         })
 
-    # Add best rules from evolution results
+    # Add best rules from evolution results.
+    # heuristiX-imported rules are kept under a separate type so the UI
+    # can distinguish them from in-dashboard evolution runs.
     for f in sorted(RESULTS_DIR.glob("evolution_*.json"),
-                    key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
+                    key=lambda p: p.stat().st_mtime, reverse=True):
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
             best = d.get("best_rule", {})
-            if best.get("code"):
-                best["type"] = d.get("method", "LLM")
-                best["file"] = f.name
-                rules.append(best)
+            if not best.get("code"):
+                continue
+            method = d.get("method", "LLM")
+            is_hx  = method.startswith("heuristiX")
+            entry = dict(best)
+            entry["type"] = method
+            entry["file"] = f.name
+            entry["scenario_trained_on"] = d.get("scenario", "")
+            entry["instance_trained_on"] = d.get("instance",  "")
+            entry["is_heuristix"] = is_hx
+            entry["summary"] = d.get("summary", {})
+            rules.append(entry)
         except Exception:
             pass
 
@@ -1292,6 +1302,99 @@ B1~B10 규칙 간 성능 분포, 최적/최악 규칙의 알고리즘 특성, �
         return jsonify({"ok": True, "narrative": resp.choices[0].message.content})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# API — heuristiX-imported rules: list + run against any instance/scenario
+# ---------------------------------------------------------------------------
+
+@app.route("/api/heuristix/list", methods=["GET"])
+def api_heuristix_list():
+    """List all heuristiX-evolved rules loaded from results/evolution_*.json."""
+    from sim.llm.heuristix_rules import load_all
+    rules = load_all()
+    items = sorted(
+        (r.to_dict() for r in rules.values()),
+        key=lambda d: (d["scenario"], d["method"], d["instance"]),
+    )
+    return jsonify({"ok": True, "count": len(items), "rules": items})
+
+
+@app.route("/api/heuristix/run", methods=["POST"])
+def api_heuristix_run():
+    """Run a heuristiX rule against the simulator.
+
+    Body:
+        rule_id   : str — id from /api/heuristix/list
+        instance  : str — benchmark instance name
+        family    : str — benchmark family (default 'custom')
+        scenario  : str — S0/S1/S2 (default 'S0')
+        n_seeds   : int — replications (default = settings)
+        ddt       : float (optional)
+    """
+    from sim.llm.heuristix_rules import load_all
+
+    body     = request.json or {}
+    rid      = body.get("rule_id", "")
+    name     = body.get("instance", "")
+    family   = body.get("family", "custom")
+    scenario = body.get("scenario", "S0")
+    n_seeds  = int(body.get("n_seeds", _settings["n_seeds_final"]))
+    ddt      = float(body.get("ddt", _settings["ddt"]))
+    sp       = _extract_scenario_params(body)
+
+    rules = load_all()
+    rule = rules.get(rid)
+    if rule is None:
+        return jsonify({"ok": False, "error": f"unknown rule_id: {rid}"}), 404
+    if not name:
+        return jsonify({"ok": False, "error": "instance required"}), 400
+
+    tid = _new_task("heuristix-run")
+
+    def worker():
+        try:
+            with _tasks_lock:
+                _tasks[tid]["status"] = "running"
+            jobs, n_m = load_instance(name, family)
+            t_est     = estimate_makespan(jobs, n_m)
+            scen_obj  = _build_scenario(scenario, **sp)
+
+            def scen_factory(seed):
+                return scen_obj.build_events(jobs, n_m, t_est, seed=seed)
+
+            _task_log(tid, f"{rid} on {name}/{scenario} ({n_seeds} seeds)…", 0)
+            ats, ptjs, mits, makespans = _eval_rule_full(
+                rule.fn, jobs, n_m, scen_factory, n_seeds, 0, ddt,
+            )
+            s = summarise_runs(ats)
+            finite_ptjs = [p for p in ptjs if p < 200]
+            finite_mits = [m for m in mits if m != float("inf")]
+            finite_ms   = [m for m in makespans if m != float("inf")]
+            s["ptj"]      = float(np.mean(finite_ptjs)) if finite_ptjs else 0.0
+            s["mit"]      = float(np.mean(finite_mits)) if finite_mits else 0.0
+            s["makespan"] = float(np.mean(finite_ms))   if finite_ms   else 0.0
+            s["rule_id"]  = rid
+            s["code_dsl"] = rule.code_dsl
+            s["scenario_trained_on"] = rule.scenario
+            s["instance_trained_on"] = rule.instance
+
+            # Compute ARI against the baselines for this (scen, instance) if available.
+            bdata = _load_results(f"baselines_{scenario}_{name}")
+            if bdata:
+                best_b = min(v["mean"] for v in bdata.values())
+                s["best_baseline_at"] = best_b
+                s["ari"] = average_relative_improvement(best_b, s["mean"])
+
+            _task_done(tid, {"result": s, "instance": name,
+                             "scenario": scenario, "t_est": t_est,
+                             "rule_id": rid})
+        except Exception:
+            import traceback
+            _task_error(tid, traceback.format_exc())
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({"ok": True, "task_id": tid, "rule_id": rid})
 
 
 # ---------------------------------------------------------------------------
