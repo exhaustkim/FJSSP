@@ -88,6 +88,61 @@
         <div id="rd-desc-content"></div>
       </div>
 
+      <!-- 자연어 설명 (LLM 호출) -->
+      <div class="wb-card mb-3" id="rd-nl-card" style="display:none">
+        <div class="wb-card-header">
+          <i class="fa fa-language text-accent"></i>
+          <span class="wb-card-title">자연어 설명 (AI)</span>
+          <button class="btn btn-sm btn-icon ms-auto" onclick="explainCurrentRule()" id="rd-nl-btn"
+                  title="이 규칙을 자연어로 다시 설명">
+            <i class="fa fa-rotate"></i>
+          </button>
+        </div>
+        <div id="rd-nl-content" class="p-2" style="font-size:13px; line-height:1.6">
+          <button class="btn btn-sm btn-primary" onclick="explainCurrentRule()">
+            <i class="fa fa-language me-1"></i>자연어로 설명 보기
+          </button>
+        </div>
+      </div>
+
+      <!-- heuristiX 규칙 실험 실행 -->
+      <div class="wb-card mb-3" id="rd-hx-card" style="display:none">
+        <div class="wb-card-header">
+          <i class="fa fa-flask text-accent"></i>
+          <span class="wb-card-title">이 규칙으로 직접 실험</span>
+        </div>
+        <div class="p-2" style="font-size:13px">
+          <div class="row g-2 mb-2">
+            <div class="col-md-5">
+              <label class="form-label small mb-1">인스턴스 (custom)</label>
+              <select id="hx-instance" class="form-select form-select-sm">
+                <option value="synth12x6_flex00">synth12x6_flex00 (strict JSSP)</option>
+                <option value="synth12x6_flex05" selected>synth12x6_flex05 (moderate FJSSP)</option>
+                <option value="synth12x6_flex10">synth12x6_flex10 (full FJSSP)</option>
+              </select>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small mb-1">시나리오</label>
+              <select id="hx-scenario" class="form-select form-select-sm">
+                <option value="S0">S0</option>
+                <option value="S1" selected>S1</option>
+                <option value="S2">S2</option>
+              </select>
+            </div>
+            <div class="col-md-2">
+              <label class="form-label small mb-1">반복</label>
+              <input id="hx-seeds" type="number" class="form-control form-control-sm" value="20" min="5" max="100">
+            </div>
+            <div class="col-md-2 d-flex align-items-end">
+              <button class="btn btn-primary btn-sm w-100" onclick="runCurrentHxRule()">
+                <i class="fa fa-play me-1"></i>실행
+              </button>
+            </div>
+          </div>
+          <div id="hx-result" class="small mt-2"></div>
+        </div>
+      </div>
+
       <!-- ③ Monaco 에디터 -->
       <div class="wb-card p-0 mb-3" style="overflow:hidden">
         <div class="p-2 border-bottom d-flex align-items-center gap-2" style="border-color:var(--border)">
@@ -396,36 +451,63 @@ function renderBaselineDesc(d) {
 
 function renderLLMDesc(r) {
   const code = r.code || '';
+  const isHx = !!(r.is_heuristix || (r.rule_id||'').startsWith('heuristiX') || (r.type||'').startsWith('heuristiX'));
 
-  // 변수 사용 분석
+  // 변수 사용 분석 — DSL 짧은 이름까지 포함
   const ALL_VARS = [
+    // 표준
     'release_time','due_date','remaining_pt','processing_time',
     'urgent_order_flag','part_available_time','current_time',
     'machine_id','avg_processing_time','machine_utilization','machine_workloads',
+    'machine_available_time','eligible_machines',
+    // DSL 짧은 이름
+    'release','due','proc','remaining_proc','part_avail','urgent',
+    'slack','penalty','total_proc','now','machine_queue','mach_util',
+    'n_ready','n_running','n_jobs','op_idx','time_to_avail',
   ];
-  const usedVars = ALL_VARS.filter(v => code.includes(v));
+  const usedVars = [...new Set(ALL_VARS.filter(v => new RegExp(`\\b${v}\\b`).test(code)))];
   const vars = usedVars.map(v => `<span class="var-badge">${v}</span>`).join('');
 
-  // 조건/분기 수
-  const condCount = (code.match(/\bif\b|\belif\b/g) || []).length;
+  // 코드 구조 분석 — Python + DSL 양쪽 인식
+  const condCount = (code.match(/\bif\b|\belif\b|\biff\s*\(|\bgt\s*\(|\blt\s*\(|\beq\s*\(/g) || []).length;
   const loopCount = (code.match(/\bfor\b|\bwhile\b/g) || []).length;
-  const mathOps   = (code.match(/\bmath\.\w+|\bexp\b|\bsqrt\b|\babs\b/g) || []).length;
+  const mathOps   = (code.match(/\bmath\.\w+|\bexp_\s*\(|\bmax_\s*\(|\bmin_\s*\(|\bclamp\s*\(|\babs\b|\bsqrt\b/g) || []).length;
   const lineCount = code.split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).length;
+  const charCount = code.length;
+  const usesExp   = /\bexp_\s*\(/.test(code);
+  const usesIff   = /\biff\s*\(/.test(code);
 
   // 외부 변수 감지
-  const usesUrgent = code.includes('urgent_order_flag');
-  const usesPart   = code.includes('part_available_time');
-  const usesUtil   = code.includes('machine_utilization');
+  const usesUrgent = /\b(urgent_order_flag|urgent)\b/.test(code);
+  const usesPart   = /\b(part_available_time|part_avail|time_to_avail)\b/.test(code);
+  const usesUtil   = /\b(machine_utilization|mach_util)\b/.test(code);
+  const usesDue    = /\b(due_date|due|slack)\b/.test(code);
+  const usesProc   = /\b(processing_time|proc|remaining_pt|remaining_proc|total_proc)\b/.test(code);
 
   const operatorDescMap = {
+    // EoH 진화 연산자
     E1: '기존 규칙에서 일부 파라미터나 로직을 무작위로 변형한 규칙입니다.',
     E2: '두 부모 규칙의 코드 구조를 교차 결합하여 생성된 규칙입니다.',
     M1: '기존 규칙의 성능을 분석한 후, LLM이 개선 방향을 스스로 반성(Reflection)하여 수정한 규칙입니다.',
     M2: '기존 규칙의 복잡한 로직을 단순화·정리하여 생성된 규칙입니다.',
     LLM_INIT: 'LLM이 시나리오 설명만을 바탕으로 처음부터 새로 생성한 초기 규칙입니다.',
     BASELINE: '사람이 직접 설계한 기본 규칙입니다.',
+    // heuristiX 변형 (P1/P2/P3) — 실험설계서 §5-2
+    P1: 'heuristiX P1 변형: LLM에게 외부 충격 변수(긴급/부품지연)를 노출하지 않은 채 진화시켰습니다. 충격이 발생해도 그것을 모르고 일반 dispatching만 학습하는 baseline.',
+    P2: 'heuristiX P2 변형: LLM에게 외부 충격 변수(urgent_order_flag, part_available_time)를 노출하고 진화시켰습니다. 충격을 인지해서 대응 가능한 규칙.',
+    P3: 'heuristiX P3 변형: P2와 동일하게 충격 변수를 노출하고, 추가로 진화 과정에서 성공/실패 경험을 메모리에 누적·재활용합니다. 가장 정교한 변형.',
   };
   const opDesc = operatorDescMap[r.operator] || 'LLM이 생성한 규칙입니다.';
+
+  // heuristiX summary 추출
+  const s = r.summary || {};
+  const sTrain = r.scenario_trained_on || '';
+  const iTrain = r.instance_trained_on || '';
+  const flexLabel = {
+    'synth12x6_flex00': 'strict JSSP (flex=0.0)',
+    'synth12x6_flex05': 'moderate FJSSP (flex=0.5)',
+    'synth12x6_flex10': 'full FJSSP (flex=1.0)',
+  }[iTrain] || iTrain;
 
   return `
     <div class="desc-block mb-3">
@@ -448,7 +530,7 @@ function renderLLMDesc(r) {
       <div class="col-md-6">
         <div class="desc-label">사용 입력 변수 (${usedVars.length}개)</div>
         <div class="mt-1">${vars || '<span class="text-muted small">변수 감지 불가</span>'}</div>
-        ${usesUrgent || usesPart ? `
+        ${usesUrgent || usesPart || usesUtil ? `
         <div class="mt-2 p-2 rounded" style="background:#1f3a5f20;border:1px solid #1f6feb40">
           <span class="small" style="color:var(--accent)">
             <i class="fa fa-circle-info me-1"></i>외부 disruption 변수 활용
@@ -457,8 +539,60 @@ function renderLLMDesc(r) {
             ${usesUtil   ? '<span class="badge badge-llm ms-1">기계 가동률</span>' : ''}
           </span>
         </div>` : ''}
+        ${usesDue || usesProc ? `
+        <div class="mt-2 p-2 rounded" style="background:#1a3a1a30;border:1px solid #2f855a40">
+          <span class="small" style="color:#9ae6b4">
+            <i class="fa fa-check me-1"></i>기본 스케줄링 변수 활용
+            ${usesDue  ? '<span class="badge bg-success ms-1">납기/여유</span>' : ''}
+            ${usesProc ? '<span class="badge bg-success ms-1">처리시간/남은작업</span>' : ''}
+          </span>
+        </div>` : ''}
+        ${usesExp || usesIff ? `
+        <div class="mt-2 p-2 rounded" style="background:#3a1a3a30;border:1px solid #9f7aea40">
+          <span class="small" style="color:#d6bcfa">
+            <i class="fa fa-cogs me-1"></i>비선형 결합
+            ${usesExp ? '<span class="badge ms-1" style="background:#9f7aea">지수 함수</span>' : ''}
+            ${usesIff ? '<span class="badge ms-1" style="background:#9f7aea">조건 분기</span>' : ''}
+          </span>
+        </div>` : ''}
       </div>
     </div>
+
+    ${isHx ? `
+    <div class="desc-block mb-3">
+      <div class="desc-label">heuristiX 학습 환경</div>
+      <div class="row g-2 mt-1" style="font-size:13px">
+        <div class="col-md-4">
+          <div class="text-muted small">학습 시나리오</div>
+          <div><strong>${sTrain || '—'}</strong> ${sTrain==='S0'?'정상':sTrain==='S1'?'부품 지연':sTrain==='S2'?'긴급 주문':''}</div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">학습 인스턴스</div>
+          <div><strong>${flexLabel || '—'}</strong></div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">학습 성능 (AT)</div>
+          <div><strong>${s.mean != null ? s.mean.toFixed(2) : '—'}</strong> ± ${s.std != null ? s.std.toFixed(2) : '—'}</div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">학습 시 ARI</div>
+          <div class="${s.ari > 0 ? 'text-success' : (s.ari < 0 ? 'text-danger' : '')}">
+            <strong>${s.ari != null ? (s.ari >= 0 ? '+' : '') + s.ari.toFixed(1) + '%' : '—'}</strong>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">학습 시 PTJ</div>
+          <div><strong>${s.ptj != null ? s.ptj.toFixed(1) + '%' : '—'}</strong></div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">학습 시 MIT</div>
+          <div><strong>${s.mit != null ? s.mit.toFixed(0) : '—'}</strong></div>
+        </div>
+      </div>
+      <div class="small text-muted mt-2">
+        <i class="fa fa-circle-info me-1"></i>이 metric은 heuristiX_v2 (Rust 시뮬레이터) 환경에서 측정. 아래 카드에서 dashboard 시뮬레이터로 재현 가능.
+      </div>
+    </div>` : ''}
 
     ${r.parents?.length ? `
     <div class="desc-block">
@@ -476,6 +610,133 @@ function renderLLMDesc(r) {
 function copyCode() {
   navigator.clipboard.writeText(currentCode)
     .then(() => toast('코드가 클립보드에 복사되었습니다!', 'success'));
+}
+
+// 현재 선택된 규칙 자연어 설명 호출
+let _currentRule = null;
+const _origSelectRule = selectRule;
+selectRule = function(idx) {
+  _origSelectRule(idx);
+  _currentRule = allRules[idx];
+  // NL 카드 표시 + 초기화
+  const card = document.getElementById('rd-nl-card');
+  const content = document.getElementById('rd-nl-content');
+  if (card && content) {
+    card.style.display = 'block';
+    content.innerHTML = `<button class="btn btn-sm btn-primary" onclick="explainCurrentRule()">
+      <i class="fa fa-language me-1"></i>자연어로 설명 보기
+    </button>`;
+  }
+  // heuristiX 규칙이면 실행 카드 표시
+  const hxCard = document.getElementById('rd-hx-card');
+  const hxResult = document.getElementById('hx-result');
+  if (hxCard) {
+    const isHx = _currentRule && (_currentRule.is_heuristix || (_currentRule.rule_id||'').startsWith('heuristiX'));
+    hxCard.style.display = isHx ? 'block' : 'none';
+    if (isHx && hxResult) hxResult.innerHTML = '';
+    // 학습된 시나리오·인스턴스가 있으면 기본값으로
+    if (isHx && _currentRule) {
+      const sc = _currentRule.scenario_trained_on;
+      const inst = _currentRule.instance_trained_on;
+      if (sc) document.getElementById('hx-scenario').value = sc;
+      if (inst) {
+        const sel = document.getElementById('hx-instance');
+        for (const o of sel.options) if (o.value === inst) { sel.value = inst; break; }
+      }
+    }
+  }
+};
+
+async function runCurrentHxRule() {
+  if (!_currentRule) return;
+  const body = {
+    rule_id: _currentRule.rule_id,
+    instance: document.getElementById('hx-instance').value,
+    family: 'custom',
+    scenario: document.getElementById('hx-scenario').value,
+    n_seeds: parseInt(document.getElementById('hx-seeds').value || '20', 10),
+  };
+  const resultEl = document.getElementById('hx-result');
+  resultEl.innerHTML = '<i class="fa fa-spinner fa-spin me-2"></i>시뮬레이션 중...';
+  try {
+    const r = await fetch('/api/heuristix/run', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    const j = await r.json();
+    if (!j.ok) { resultEl.innerHTML = `<div class="text-danger">${j.error || '실패'}</div>`; return; }
+    const tid = j.task_id;
+    // poll
+    let last = null;
+    for (let i = 0; i < 60; i++) {
+      await new Promise(res => setTimeout(res, 2000));
+      const tr = await fetch(`/api/tasks/${tid}`).then(r => r.json());
+      const d = tr.data || {};
+      last = d;
+      if (d.status === 'completed' || d.status === 'error') break;
+    }
+    if (!last || last.status !== 'completed') {
+      resultEl.innerHTML = `<div class="text-warning">미완료: ${last?.status||'unknown'}</div>`;
+      return;
+    }
+    const rs = last.result?.result || {};
+    const ari = rs.ari ?? null;
+    const ariStr = ari === null ? '—' : `${ari >= 0 ? '+' : ''}${ari.toFixed(1)}%`;
+    const ariColor = ari === null ? '' : (ari > 0 ? 'text-success' : (ari < -2 ? 'text-danger' : 'text-warning'));
+    resultEl.innerHTML = `
+      <div class="row g-2">
+        <div class="col-md-3"><div class="text-muted small">AT (평균)</div><div><strong>${rs.mean?.toFixed(2) ?? '—'}</strong> ± ${rs.std?.toFixed(2) ?? '—'}</div></div>
+        <div class="col-md-3"><div class="text-muted small">PTJ</div><div><strong>${rs.ptj?.toFixed(1) ?? '—'}%</strong></div></div>
+        <div class="col-md-3"><div class="text-muted small">MIT</div><div><strong>${rs.mit?.toFixed(0) ?? '—'}</strong></div></div>
+        <div class="col-md-3"><div class="text-muted small">ARI vs best baseline</div><div class="${ariColor}"><strong>${ariStr}</strong></div></div>
+      </div>
+      ${rs.best_baseline_at ? `<div class="text-muted mt-2">최고 baseline AT: ${rs.best_baseline_at.toFixed(2)}</div>` : ''}
+      <div class="text-muted mt-1">학습 환경: ${rs.scenario_trained_on}/${rs.instance_trained_on}</div>
+    `;
+  } catch (e) {
+    resultEl.innerHTML = `<div class="text-danger">오류: ${e}</div>`;
+  }
+}
+
+async function explainCurrentRule() {
+  if (!_currentRule) { toast('규칙을 먼저 선택하세요','warning'); return; }
+  const content = document.getElementById('rd-nl-content');
+  content.innerHTML = '<i class="fa fa-spinner fa-spin me-2"></i>AI가 규칙을 분석 중...';
+  try {
+    const r = await fetch('/api/rule/explain', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        code: _currentRule.code || '',
+        rule_id: _currentRule.rule_id || '',
+        context: {scenario: '', }
+      })
+    });
+    const d = await r.json();
+    if (!d.ok) { content.innerHTML = `<div class="text-danger small">${d.error}</div>`; return; }
+    const v = (d.variables_used || []).map(x => `<span class="var-badge">${x}</span>`).join(' ');
+    content.innerHTML = `
+      <div class="mb-2"><strong>한 줄 요약:</strong> ${d.summary || '—'}</div>
+      <div class="mb-2"><strong>직관:</strong> <span style="color:var(--text-secondary)">${d.intuition || '—'}</span></div>
+      <div class="mb-2"><strong>핵심 변수:</strong> ${v || '—'}</div>
+      <div class="row g-2 mt-2">
+        <div class="col-md-6">
+          <div class="p-2 rounded" style="background:#1a3a1a30;border:1px solid #2f855a40">
+            <div class="small" style="color:#9ae6b4"><i class="fa fa-check me-1"></i>강한 상황</div>
+            <div class="small mt-1">${d.when_strong || '—'}</div>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="p-2 rounded" style="background:#3a1a1a30;border:1px solid #c5303040">
+            <div class="small" style="color:#feb2b2"><i class="fa fa-triangle-exclamation me-1"></i>약한 상황</div>
+            <div class="small mt-1">${d.when_weak || '—'}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    content.innerHTML = `<div class="text-danger small">${e}</div>`;
+  }
 }
 
 loadRules();

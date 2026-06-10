@@ -45,11 +45,15 @@
         </label>
         <label class="d-flex align-items-center gap-2 mb-2">
           <input type="checkbox" class="form-check-input" id="sec-evolution" checked>
-          진화 결과
+          진화 결과 <span class="badge bg-secondary ms-1" style="font-size:9px">개선 의미 + 자연어 설명 포함</span>
         </label>
-        <label class="d-flex align-items-center gap-2">
+        <label class="d-flex align-items-center gap-2 mb-2">
           <input type="checkbox" class="form-check-input" id="sec-summary" checked>
           요약
+        </label>
+        <label class="d-flex align-items-center gap-2">
+          <input type="checkbox" class="form-check-input" id="opt-nl" checked>
+          <span class="text-info"><i class="fa fa-language"></i> 규칙 자연어 설명 (LLM 호출)</span>
         </label>
       </div>
 
@@ -136,6 +140,7 @@ async function generateReport(format) {
     family:   document.getElementById('rg-family').value,
     scenario: document.getElementById('rg-scenario').value,
     sections: getSections(),
+    include_nl: document.getElementById('opt-nl')?.checked ?? true,
   };
 
   document.getElementById('rg-loading').style.display = 'block';
@@ -189,6 +194,7 @@ async function refreshPreview() {
     family:   document.getElementById('rg-family').value,
     scenario: document.getElementById('rg-scenario').value,
     sections: getSections(),
+    include_nl: document.getElementById('opt-nl')?.checked ?? true,
   };
 
   document.getElementById('rg-loading').style.display = 'block';
