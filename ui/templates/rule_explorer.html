@@ -451,36 +451,63 @@ function renderBaselineDesc(d) {
 
 function renderLLMDesc(r) {
   const code = r.code || '';
+  const isHx = !!(r.is_heuristix || (r.rule_id||'').startsWith('heuristiX') || (r.type||'').startsWith('heuristiX'));
 
-  // 변수 사용 분석
+  // 변수 사용 분석 — DSL 짧은 이름까지 포함
   const ALL_VARS = [
+    // 표준
     'release_time','due_date','remaining_pt','processing_time',
     'urgent_order_flag','part_available_time','current_time',
     'machine_id','avg_processing_time','machine_utilization','machine_workloads',
+    'machine_available_time','eligible_machines',
+    // DSL 짧은 이름
+    'release','due','proc','remaining_proc','part_avail','urgent',
+    'slack','penalty','total_proc','now','machine_queue','mach_util',
+    'n_ready','n_running','n_jobs','op_idx','time_to_avail',
   ];
-  const usedVars = ALL_VARS.filter(v => code.includes(v));
+  const usedVars = [...new Set(ALL_VARS.filter(v => new RegExp(`\\b${v}\\b`).test(code)))];
   const vars = usedVars.map(v => `<span class="var-badge">${v}</span>`).join('');
 
-  // 조건/분기 수
-  const condCount = (code.match(/\bif\b|\belif\b/g) || []).length;
+  // 코드 구조 분석 — Python + DSL 양쪽 인식
+  const condCount = (code.match(/\bif\b|\belif\b|\biff\s*\(|\bgt\s*\(|\blt\s*\(|\beq\s*\(/g) || []).length;
   const loopCount = (code.match(/\bfor\b|\bwhile\b/g) || []).length;
-  const mathOps   = (code.match(/\bmath\.\w+|\bexp\b|\bsqrt\b|\babs\b/g) || []).length;
+  const mathOps   = (code.match(/\bmath\.\w+|\bexp_\s*\(|\bmax_\s*\(|\bmin_\s*\(|\bclamp\s*\(|\babs\b|\bsqrt\b/g) || []).length;
   const lineCount = code.split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).length;
+  const charCount = code.length;
+  const usesExp   = /\bexp_\s*\(/.test(code);
+  const usesIff   = /\biff\s*\(/.test(code);
 
   // 외부 변수 감지
-  const usesUrgent = code.includes('urgent_order_flag');
-  const usesPart   = code.includes('part_available_time');
-  const usesUtil   = code.includes('machine_utilization');
+  const usesUrgent = /\b(urgent_order_flag|urgent)\b/.test(code);
+  const usesPart   = /\b(part_available_time|part_avail|time_to_avail)\b/.test(code);
+  const usesUtil   = /\b(machine_utilization|mach_util)\b/.test(code);
+  const usesDue    = /\b(due_date|due|slack)\b/.test(code);
+  const usesProc   = /\b(processing_time|proc|remaining_pt|remaining_proc|total_proc)\b/.test(code);
 
   const operatorDescMap = {
+    // EoH 진화 연산자
     E1: '기존 규칙에서 일부 파라미터나 로직을 무작위로 변형한 규칙입니다.',
     E2: '두 부모 규칙의 코드 구조를 교차 결합하여 생성된 규칙입니다.',
     M1: '기존 규칙의 성능을 분석한 후, LLM이 개선 방향을 스스로 반성(Reflection)하여 수정한 규칙입니다.',
     M2: '기존 규칙의 복잡한 로직을 단순화·정리하여 생성된 규칙입니다.',
     LLM_INIT: 'LLM이 시나리오 설명만을 바탕으로 처음부터 새로 생성한 초기 규칙입니다.',
     BASELINE: '사람이 직접 설계한 기본 규칙입니다.',
+    // heuristiX 변형 (P1/P2/P3) — 실험설계서 §5-2
+    P1: 'heuristiX P1 변형: LLM에게 외부 충격 변수(긴급/부품지연)를 노출하지 않은 채 진화시켰습니다. 충격이 발생해도 그것을 모르고 일반 dispatching만 학습하는 baseline.',
+    P2: 'heuristiX P2 변형: LLM에게 외부 충격 변수(urgent_order_flag, part_available_time)를 노출하고 진화시켰습니다. 충격을 인지해서 대응 가능한 규칙.',
+    P3: 'heuristiX P3 변형: P2와 동일하게 충격 변수를 노출하고, 추가로 진화 과정에서 성공/실패 경험을 메모리에 누적·재활용합니다. 가장 정교한 변형.',
   };
   const opDesc = operatorDescMap[r.operator] || 'LLM이 생성한 규칙입니다.';
+
+  // heuristiX summary 추출
+  const s = r.summary || {};
+  const sTrain = r.scenario_trained_on || '';
+  const iTrain = r.instance_trained_on || '';
+  const flexLabel = {
+    'synth12x6_flex00': 'strict JSSP (flex=0.0)',
+    'synth12x6_flex05': 'moderate FJSSP (flex=0.5)',
+    'synth12x6_flex10': 'full FJSSP (flex=1.0)',
+  }[iTrain] || iTrain;
 
   return `
     <div class="desc-block mb-3">
@@ -503,7 +530,7 @@ function renderLLMDesc(r) {
       <div class="col-md-6">
         <div class="desc-label">사용 입력 변수 (${usedVars.length}개)</div>
         <div class="mt-1">${vars || '<span class="text-muted small">변수 감지 불가</span>'}</div>
-        ${usesUrgent || usesPart ? `
+        ${usesUrgent || usesPart || usesUtil ? `
         <div class="mt-2 p-2 rounded" style="background:#1f3a5f20;border:1px solid #1f6feb40">
           <span class="small" style="color:var(--accent)">
             <i class="fa fa-circle-info me-1"></i>외부 disruption 변수 활용
@@ -512,8 +539,60 @@ function renderLLMDesc(r) {
             ${usesUtil   ? '<span class="badge badge-llm ms-1">기계 가동률</span>' : ''}
           </span>
         </div>` : ''}
+        ${usesDue || usesProc ? `
+        <div class="mt-2 p-2 rounded" style="background:#1a3a1a30;border:1px solid #2f855a40">
+          <span class="small" style="color:#9ae6b4">
+            <i class="fa fa-check me-1"></i>기본 스케줄링 변수 활용
+            ${usesDue  ? '<span class="badge bg-success ms-1">납기/여유</span>' : ''}
+            ${usesProc ? '<span class="badge bg-success ms-1">처리시간/남은작업</span>' : ''}
+          </span>
+        </div>` : ''}
+        ${usesExp || usesIff ? `
+        <div class="mt-2 p-2 rounded" style="background:#3a1a3a30;border:1px solid #9f7aea40">
+          <span class="small" style="color:#d6bcfa">
+            <i class="fa fa-cogs me-1"></i>비선형 결합
+            ${usesExp ? '<span class="badge ms-1" style="background:#9f7aea">지수 함수</span>' : ''}
+            ${usesIff ? '<span class="badge ms-1" style="background:#9f7aea">조건 분기</span>' : ''}
+          </span>
+        </div>` : ''}
       </div>
     </div>
+
+    ${isHx ? `
+    <div class="desc-block mb-3">
+      <div class="desc-label">heuristiX 학습 환경</div>
+      <div class="row g-2 mt-1" style="font-size:13px">
+        <div class="col-md-4">
+          <div class="text-muted small">학습 시나리오</div>
+          <div><strong>${sTrain || '—'}</strong> ${sTrain==='S0'?'정상':sTrain==='S1'?'부품 지연':sTrain==='S2'?'긴급 주문':''}</div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">학습 인스턴스</div>
+          <div><strong>${flexLabel || '—'}</strong></div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">학습 성능 (AT)</div>
+          <div><strong>${s.mean != null ? s.mean.toFixed(2) : '—'}</strong> ± ${s.std != null ? s.std.toFixed(2) : '—'}</div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">학습 시 ARI</div>
+          <div class="${s.ari > 0 ? 'text-success' : (s.ari < 0 ? 'text-danger' : '')}">
+            <strong>${s.ari != null ? (s.ari >= 0 ? '+' : '') + s.ari.toFixed(1) + '%' : '—'}</strong>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">학습 시 PTJ</div>
+          <div><strong>${s.ptj != null ? s.ptj.toFixed(1) + '%' : '—'}</strong></div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">학습 시 MIT</div>
+          <div><strong>${s.mit != null ? s.mit.toFixed(0) : '—'}</strong></div>
+        </div>
+      </div>
+      <div class="small text-muted mt-2">
+        <i class="fa fa-circle-info me-1"></i>이 metric은 heuristiX_v2 (Rust 시뮬레이터) 환경에서 측정. 아래 카드에서 dashboard 시뮬레이터로 재현 가능.
+      </div>
+    </div>` : ''}
 
     ${r.parents?.length ? `
     <div class="desc-block">
